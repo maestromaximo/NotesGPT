@@ -42,14 +42,14 @@ import telegram
 import threading
 import time
 
-import tkinter as tk
-from tkinter import filedialog
+# import tkinter as tk
+# from tkinter import filedialog
 
 import pytesseract
 from PIL import Image
 from pdf2image import convert_from_path
 
-import tiktoken
+
 
 
 from google.oauth2.credentials import Credentials
@@ -61,6 +61,8 @@ from googleapiclient.errors import HttpError
 import wolframalpha
 
 nltk.download("punkt")
+nltk.download('stopwords')
+nltk.download('averaged_perceptron_tagger')
 
 class Course:
     def __init__(self, name, code, folder):
@@ -79,12 +81,33 @@ class TableOfContents:
     def __init__(self, contents):
         self.contents = contents
 
+    def __str__(self):
+        return "\n".join([str(content) for content in self.contents])
+
+    def fill_end_pages(self):
+        for i, content in enumerate(self.contents):
+            if i + 1 < len(self.contents):
+                next_content = self.contents[i + 1]
+                if content.startPage == next_content.startPage:
+                    content.endPage = content.startPage
+                else:
+                    content.endPage = next_content.startPage - 1
+            else:
+                content.endPage = content.startPage
+
+
 class Content:
     def __init__(self, chapter, name, startPage, endPage=None):
         self.chapter = chapter
         self.name = name
         self.startPage = startPage
         self.endPage = endPage
+
+    def __str__(self):
+        if self.endPage:
+            return f"{self.chapter} {self.name} (pp. {self.startPage}-{self.endPage})"
+        else:
+            return f"{self.chapter} {self.name} (p. {self.startPage})"
 
 class MainNote:
     def __init__(self, name, total_pages, lessons, tableOfContents = None):
@@ -118,10 +141,6 @@ class MainNote:
         self.tableOfContents = TableOfContents(contents)
         print("[completed]")
         print()
-
-
-
-
     
     
     
@@ -335,8 +354,8 @@ def summarize_transcript(transcript):
     maxTokens = 2950
     ratio = 0.75
     maxWords = int(maxTokens / ratio)
-    finalText = transcript
-    words = transcript.split()
+    finalText = transcript.decode('utf-8') # decode the transcript parameter
+    words = finalText.split()
     sections = []
     
     if tokenTotal > maxTokens:
@@ -355,7 +374,7 @@ def summarize_transcript(transcript):
                     section2 = " ".join(section_words[split_idx:])
                     section = section1
                     new_sections.append(section2)
-                summarized_section = askGpt(f"Please summarize this transcript section. It is a part of a bigger transcript and needs to be shortened. Here is the transcript: {section}", gpt4=False)
+                summarized_section = askGpt(f"Please summarize this transcript section. It is a part of a bigger transcript and needs to be shortened. Here is the transcript: {section}", gpt4=False)##SWITCH
                 new_sections.append(summarized_section)
             sections = new_sections
             print("Total Token count: " + str(totalSectionTokenCount(sections)))
@@ -383,6 +402,7 @@ def review_due_lessons(courses, gpt4=False):
             continue
         
         for lesson in lessons:
+            print(f"Lesson {lesson.name} due {lesson.due_date}")
             if lesson.due_date <= datetime.date.today():
                 # Generate examples
 
@@ -397,17 +417,33 @@ def review_due_lessons(courses, gpt4=False):
                 # Ask user for rating
                 print(f"Examples for lesson '{lesson.name}':\n{examples}")
 
+                print()
+                print("Lets first try some prolems now:")
+                print()
+                subjects = ', '.join(lesson.listOfSubjects) if lesson.listOfSubjects is not None else 'No subjects provided'# and noExample = True
+                prompt = f"Generate 3 problem questions for the lesson '{lesson.name}' with the following topics: {subjects}"
+                examples = askGptContext(prompt, lesson.summary, gpt4)
+
+                prompt2 = f"Generate 2 problem questions for the lesson '{lesson.name}' with the following summary: {lesson.summary}"
+                examples2 = askGpt(prompt2, gpt4)
+                # Ask user for rating
+                print(f"Problems for lesson '{lesson.name}':\n{examples}")
+                print(examples2)
+
                 f = input("Press any key to contiue.")
                 
                 if(lesson.transcript == None):
                     print("Could not generate flashcards, no transcript detected")
                 else:
-                    flashcards = generate_flashcards(lesson.transcript) 
+                    if isinstance(lesson.transcript, bytes):
+                        passableTranscript = lesson.transcript.decode('utf-8')
+
+                    flashcards = generate_flashcards(passableTranscript) 
                     print()
                     print("Lets review terms now:")
                     print()
 
-                    totalCards = len(flashcard)
+                    totalCards = len(flashcards)
                     correct = 0
                     for flashcard in flashcards:
                         boool = flashcard.intelligentTest()
@@ -426,6 +462,9 @@ def review_due_lessons(courses, gpt4=False):
                 # Update lesson
                 lesson.update(rating)
     save_courses(courses, DATA_FILE)
+    print()
+    print("progress saved")
+    print()
 
 def waiting_wheel():
     while True:
@@ -463,10 +502,10 @@ wolframClient = wolframalpha.Client(WOLFRAM_APP_ID)
 pytesseract.pytesseract.tesseract_cmd = "C:/Users/aleja/AppData/Local/Programs/Tesseract-OCR/tesseract.exe"##change this to your own location
 
 bot_token = os.getenv("TELEGRAM_TOKEN")
-user_id =9999 ##change this to your own
+user_id =os.getenv("TELEGRAM_ID") ##change this to your own
 
 ####bot = telegram.Bot(token=bot_token)
-
+pineConeAPIkey = os.getenv("PINECONE_API_KEY2")
 
 #bot.send_message(chat_id=user_id, text="Hello from the Python script!")
 
@@ -499,9 +538,24 @@ SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/a
 DATA_FILE = "courses_data.json"
 SAVING_FOLDER = "C:/Users/aleja/OneDrive/Escritorio/RemarkableGPT/mainSaving"
 
-pinecone.init(api_key="YOUR TOKEN", environment=pinecome_env)
+pinecone.init(api_key=pineConeAPIkey, environment=pinecome_env)
 #pinecone.create_index("chunks", dimension=1536)
 index = pinecone.Index("chunks")
+
+def load_table_of_contents(contents_str):
+    contents = []
+    lines = contents_str.split("\n")
+    
+    for line in lines:
+        match = re.match(r"(\d+(?:\.\d+)?(?:\.\d+)?)(.*?)\.*(\d+)", line)
+        
+        if match:
+            chapter = match.group(1)
+            name = match.group(2).strip()
+            startPage = int(match.group(3))
+            contents.append(Content(chapter, name, startPage))
+            
+    return TableOfContents(contents)
 
 def driveProtocol2():
     #time.sleep(600)
@@ -689,8 +743,53 @@ def askGptOLD(prompt, gpt4):
 
     message = response.choices[0].message["content"].strip()
     return message
-
 def askGptContext(prompt, chunks, gpt4):
+    conversation = [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": f"Here is context to my next question from my book \"{chunks}\""}, {"role": "user", "content": prompt}]
+    
+    # Calculate available tokens for the response
+    context_tokens = numTokensFromString(chunks)
+    prompt_tokens = numTokensFromString(prompt)
+    max_allowed_tokens = 4000  # Set the maximum allowed tokens
+    available_tokens_for_response = max_allowed_tokens - (context_tokens + prompt_tokens)
+
+    # Ensure the available tokens for the response is within the model's limit
+    if available_tokens_for_response < 1:
+        raise ValueError("The input query and context are too long. Please reduce the length.")
+
+    max_retries = 4
+    for _ in range(max_retries + 1):  # This will try a total of 5 times (including the initial attempt)
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-4" if gpt4 else "gpt-3.5-turbo",
+                messages=conversation,
+                max_tokens=available_tokens_for_response,
+                n=1,
+                stop=None,
+                temperature=0.1,
+            )
+
+            message = response.choices[0].message["content"].strip()
+
+            # Count tokens
+            response_tokens = numTokensFromString(message)
+            total_tokens = context_tokens + prompt_tokens + response_tokens
+
+            # Calculate cost
+            cost_per_token = 0.06 if gpt4 else 0.002
+            cost = (total_tokens / 1000) * cost_per_token
+
+            # Update the cost file
+            updateCostFile(cost)
+
+            return message
+        
+        except Exception as e:
+            if _ < max_retries:
+                print(f"Error occurred: {e}. Retrying {_ + 1}/{max_retries}...")
+                time.sleep(1)  # You can adjust the sleep time as needed
+            else:
+                raise
+def askGptContextOLD2(prompt, chunks, gpt4):
     conversation = [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": f"Here is context to my next question from my book \"{chunks}\""}, {"role": "user", "content": prompt}]
     
     response = openai.ChatCompletion.create(
@@ -719,6 +818,54 @@ def askGptContext(prompt, chunks, gpt4):
     return message
 
 def askGpt(prompt, gpt4):
+    conversation = [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": prompt}]
+    
+    # Calculate available tokens for the response
+    prompt_tokens = numTokensFromString(prompt)
+    max_allowed_tokens = 4000  # Set the maximum allowed tokens
+    available_tokens_for_response = max_allowed_tokens - prompt_tokens
+
+    # Ensure the available tokens for the response is within the model's limit
+    if available_tokens_for_response < 1:
+        raise ValueError("The input query is too long. Please reduce the length of the input query.")
+    
+    max_retries = 4
+    for _ in range(max_retries + 1):  # This will try a total of 5 times (including the initial attempt)
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-4" if gpt4 else "gpt-3.5-turbo",
+                messages=conversation,
+                max_tokens=available_tokens_for_response,
+                n=1,
+                stop=None,
+                temperature=0.1,
+            )
+
+            message = response.choices[0].message["content"].strip()
+
+            # Count tokens
+            response_tokens = numTokensFromString(message)
+            total_tokens = prompt_tokens + response_tokens
+
+            # Calculate cost
+            cost_per_token = 0.06 if gpt4 else 0.002
+            cost = (total_tokens / 1000) * cost_per_token
+
+            # Update the cost file
+            updateCostFile(cost)
+
+            return message
+        
+        except Exception as e:
+            if _ < max_retries:
+                print(f"Error occurred: {e}. Retrying {_ + 1}/{max_retries}...")
+                time.sleep(1)  # You can adjust the sleep time as needed
+            else:
+                raise
+
+
+
+def askGptOLD2(prompt, gpt4):
     conversation = [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": prompt}]
     
     response = openai.ChatCompletion.create(
@@ -1087,12 +1234,12 @@ def getInitialLesson(file_path, numPages):
     for i in range(numPages):
         content += extract_text_from_page(file_path, i)
 
-    title = getLessonTitle(file_path, 1)
-    question = f"I have used OCR to get the text from a lesson from my notes, it will have grammatical errors; however, I need you to please list to me a list of as many topics as you may detect on the notes, find all of them and return them on this format [topic1, topic2, topic3, ...] and so on, Only answer with the list, nothing else. The title of the lesson is \"{title}\" and here is the content: {content}"
-    answer = askGpt(question, gpt4=True)
-    topics = extract_topics_from_response(answer)
-    question2 = f"Please provide a summary to this OCR transcription, keep in mind it will have many grammatical errors. I will also provide the name of the lesson and a list of topics inside. Content: \"{content}\"; title: \"{title}\";list of topics: \"{topics}\""
-    gptContent = askGpt(question2, gpt4=False)
+    title = "Non Trancripted title"#getLessonTitle(file_path, 1)
+    #question = f"I have used OCR to get the text from a lesson from my notes, it will have grammatical errors; however, I need you to please list to me a list of as many topics as you may detect on the notes, find all of them and return them on this format [topic1, topic2, topic3, ...] and so on, Only answer with the list, nothing else. The title of the lesson is \"{title}\" and here is the content: {content}"
+    #answer = askGpt(question, gpt4=False)
+    topics = ["none yet"] #extract_topics_from_response(answer)
+    #question2 = f"Please provide a summary to this OCR transcription, keep in mind it will have many grammatical errors. I will also provide the name of the lesson and a list of topics inside. Content: \"{content}\"; title: \"{title}\";list of topics: \"{topics}\""
+    gptContent = "Non transcripted summary"#askGpt(question2, gpt4=False)
 
     theLesson = Lesson(title, content, gptContent, topics, 1, numPages, None, None, 2.5, 1, 0, None)
 
@@ -1113,9 +1260,53 @@ def getNewestLesson(course):
         content += extract_text_from_page(file_path, startPage + count)
         count += 1
 
+    title = "Non Trancripted title"#getLessonTitle(file_path, 1)
+    #question = f"I have used OCR to get the text from a lesson from my notes, it will have grammatical errors; however, I need you to please list to me a list of as many topics as you may detect on the notes, find all of them and return them on this format [topic1, topic2, topic3, ...] and so on, Only answer with the list, nothing else. The title of the lesson is \"{title}\" and here is the content: {content}"
+    #answer = askGpt(question, gpt4=False)
+    topics = ["none yet"] #extract_topics_from_response(answer)
+    #question2 = f"Please provide a summary to this OCR transcription, keep in mind it will have many grammatical errors. I will also provide the name of the lesson and a list of topics inside. Content: \"{content}\"; title: \"{title}\";list of topics: \"{topics}\""
+    gptContent = "Non transcripted summary"#askGpt(question2, gpt4=False)
+
+    theLesson = Lesson(title, content, gptContent, topics, startPage, numPages, None, None, 2.5, 1, 0, None)
+    
+    return theLesson
+
+def getInitialLessonOCR(file_path, numPages):
+
+    content = ""
+
+    for i in range(numPages):
+        content += extract_text_from_page(file_path, i)
+
+    title = getLessonTitle(file_path, 1)
+    question = f"I have used OCR to get the text from a lesson from my notes, it will have grammatical errors; however, I need you to please list to me a list of as many topics as you may detect on the notes, find all of them and return them on this format [topic1, topic2, topic3, ...] and so on, Only answer with the list, nothing else. The title of the lesson is \"{title}\" and here is the content: {content}"
+    answer = askGpt(question, gpt4=False)
+    topics = extract_topics_from_response(answer)
+    question2 = f"Please provide a summary to this OCR transcription, keep in mind it will have many grammatical errors. I will also provide the name of the lesson and a list of topics inside. Content: \"{content}\"; title: \"{title}\";list of topics: \"{topics}\""
+    gptContent = askGpt(question2, gpt4=False)
+
+    theLesson = Lesson(title, content, gptContent, topics, 1, numPages, None, None, 2.5, 1, 0, None)
+
+    return theLesson
+
+def getNewestLessonOCR(course):
+
+    file_path = os.path.join(course.folder, course.main_note.name)
+    lessons = course.main_note.lessons
+    lastLessonNum = len(lessons) - 1
+    numPages = get_page_count(file_path)
+
+    startPage = lessons[lastLessonNum].lastPage + 1
+
+    content = ""
+    count = 0
+    while count < (numPages - (startPage -1)):
+        content += extract_text_from_page(file_path, startPage + count)
+        count += 1
+
     title = getLessonTitle(file_path, startPage)
     question = f"I have used OCR to get the text from a lesson from my notes, it will have grammatical errors; however, I need you to please list to me a list of as many topics as you may detect on the notes, find all of them and return them on this format [topic1, topic2, topic3, ...] and so on, Only answer with the list, nothing else. The title of the lesson is \"{title}\" and here is the content: {content}"
-    answer = askGpt(question, gpt4=True)
+    answer = askGpt(question, gpt4=False)
     topics = extract_topics_from_response(answer)
     question2 = f"Please provide a summary to this OCR transcription, keep in mind it will have many grammatical errors. I will also provide the name of the lesson and a list of topics inside. Content: \"{content}\"; title: \"{title}\";list of topics: \"{topics}\""
     gptContent = askGpt(question2, gpt4=False)
@@ -1129,19 +1320,22 @@ def updateNewestWithTranscript(course):#    def __init__(self, name, content,sum
     
     lessons = course.main_note.lessons
     
-    if lessons[-1].transcript:
-
+    #print(lessons[-1].transcript)
+    if lessons[-1].transcript != None:
+        print("TEST INNNN")
         summarizedTranscript = summarize_transcript(lessons[-1].transcript)
         title = askGpt(f"Given this summarized transcript for my lesson, what would be an accurate title for the lesson, return only the title: {summarizedTranscript}", gpt4=False)
         question = f"Here is a summary of my transcribed lesson, it may have grammatical errors; however, I need you to please list to me a list of as many topics as you may detect on the summary, find all of them and return them on this format [topic1, topic2, topic3, ...] and so on, Only answer with the list, nothing else. The title of the lesson is \"{title}\" and here is the content: {summarizedTranscript}"
-        answer = askGpt(question, gpt4=True)
+        answer = askGpt(question, gpt4=True) ## PRICY
         topics = extract_topics_from_response(answer)
         
         lessons[-1].name = title
         lessons[-1].summary = summarizedTranscript
         lessons[-1].listOfSubjects = topics
 
-    
+    #print("SECOND TEST PRINT")
+    #print(lessons[-1])
+    #print("SECOND TEST PRINT")
     return lessons[-1]
 
 
@@ -1598,6 +1792,120 @@ def search_proofwiki(query, max_results=10, returnList=True):
     
     return links if returnList else get_page_content(links[0])
 
+def extract_questions_from_pdf(file_path):
+    pdf = PdfReader(file_path)
+    text = ""
+
+    for page_num in tqdm(range(len(pdf.pages)), desc="Processing PDF"):
+        text += pdf.pages[page_num].extract_text()
+
+    # Split the text into lines
+    lines = text.split('\n')
+
+    # Regular expressions to match main and sub questions
+    main_question_re = re.compile(r'^\d+[.)]')
+    sub_question_re = re.compile(r'^[a-z]|[ivx]+[.)]')
+
+    questions = []
+    current_question = None
+
+    for line in lines:
+        # Check if the line matches the main question pattern
+        if main_question_re.match(line):
+            # If there's a current question, add it to the list
+            if current_question is not None:
+                questions.append(current_question)
+            # Start a new question
+            current_question = {'question': line, 'sub_questions': []}
+        # Check if the line matches the sub question pattern
+        elif sub_question_re.match(line):
+            # If there's a current question, add the sub question to it
+            if current_question is not None:
+                current_question['sub_questions'].append(line)
+        # If the line doesn't match either pattern, add it to the current question or sub question
+        elif current_question is not None:
+            if current_question['sub_questions']:
+                current_question['sub_questions'][-1] += ' ' + line
+            else:
+                current_question['question'] += ' ' + line
+
+    # Add the last question to the list
+    if current_question is not None:
+        questions.append(current_question)
+
+    return questions
+def getNumTranscripts(service, course):
+    totalCount = 0
+    folder_id = code_to_folder[course.code]
+    files = list_files_in_folder(service, folder_id)
+    for file in files:
+        if "transcript" in file['name'].lower():
+            totalCount += 1
+    return totalCount
+
+def getAllTranscriptsInCourse(service, course):
+    transcriptList = []
+    folder_id = code_to_folder[course.code]
+    files = list_files_in_folder(service, folder_id)
+    for file in files:
+        if "transcript" in file['name'].lower():
+            #Download the transcript file
+            transcript = download_file_content(service, file['id'])
+            transcriptList.append(transcript)
+    return transcriptList
+
+
+def emergencyTranscriptProtocol():
+    creds = get_credentials()
+    service = build('drive', 'v3', credentials=creds)
+    courses = load_courses(DATA_FILE)
+    for course in courses:
+        file_path = os.path.join(course.folder, course.main_note.name)
+        priorLessons = course.main_note.lessons
+        numTotalPages = get_page_count(file_path)
+        numOfLessonsPrior = len(priorLessons)
+        numLastPagePrior = 0
+        flagLastPage = False
+        numTranscripts = getNumTranscripts(service, course)
+
+        if numTranscripts == 0:
+            continue
+
+        numTotalLessons = numTranscripts + numOfLessonsPrior
+
+        averagePagesPerLesson = (numTotalPages/numTotalLessons)
+
+        if course.main_note.lessons[-1].lastPage != None:
+            numLastPagePrior = course.main_note.lessons[-1].lastPage
+        else:
+            flagLastPage = True ## we need to then do a heuristic
+            numLastPagePrior = averagePagesPerLesson*numOfLessonsPrior
+        ##Now we create per each transcript a new lesson and set the page number as per average
+        ##This WILL NOT, be accurate all times. 
+
+        listOfTranscripts = getAllTranscriptsInCourse(service, course)
+        for transcript in listOfTranscripts:
+            startPage = numLastPagePrior + 1
+            content = ""
+            count = 0
+            # while count < (numLastPagePrior - (startPage -1)):
+            #     content += extract_text_from_page(file_path, startPage + count)
+            #     count += 1
+
+            title = "Non Trancripted title"#getLessonTitle(file_path, 1)
+    
+            topics = ["none yet"] #extract_topics_from_response(answer)
+            gptContent = "Non transcripted summary"#askGpt(question2, gpt4=False)
+
+            theLesson = Lesson(title, content, gptContent, topics, startPage, (numLastPagePrior+averagePagesPerLesson), None, None, 2.5, 1, 0, transcript)
+            course.main_note.lessons.append(theLesson)
+            print("new lesson")
+            course.main_note.lessons[-1] = updateNewestWithTranscript(course)
+            numLastPagePrior += averagePagesPerLesson
+    save_courses(courses, DATA_FILE)
+    print("courses have been loaded.")
+        
+
 
 def main():
     """The main function that runs the entire script, handling Google Drive operations and interacting with Pinecone and GPT."""
@@ -1634,13 +1942,17 @@ def main():
         # Save courses to file
         save_courses(courses, DATA_FILE)
     print("courses have been loaded.")
-
+    
+    emergencyTranscriptProtocol()
+    print("Protocol finished")
+    sys.exit()
     for course in courses:
         file_path = os.path.join(course.folder, course.main_note.name)
         newLesson =checkIfNewLesson(course.main_note, file_path)
         updateLessons(course)
         process_transcripts(service, course)
         if newLesson:
+            print("new lesson")
             course.main_note.lessons[-1] = updateNewestWithTranscript(course)
 
     if should_run_schedule_due_dates():
@@ -1651,7 +1963,7 @@ def main():
     
 ###################google
     print("what would you like to do?")
-    print("Load a pdf (1), Query DB (2), Idle Run (3), Run checkUp (4) Close (9)")
+    print("Load a pdf (1), Query DB (2), Idle Run (3), Run checkUp (4), Fix latest T (5), Close (9)")
     print()
     loader = input("Option: ")
 
@@ -1664,48 +1976,49 @@ def main():
         # Store the chunks in Pinecone
         store_chunks(pdf_chunks)
     elif(loader == "2"):
-        print("Query mode")
-        query = input("Input Query: ")
-        relevant_chunk_scores = query_chunks(query)
-        relevant_chunks = " ".join([chunk['id'] for chunk in relevant_chunk_scores])
+        while(True):
+            print("Query mode")
+            query = input("Input Query: ")
+            relevant_chunk_scores = query_chunks(query)
+            relevant_chunks = " ".join([chunk['id'] for chunk in relevant_chunk_scores])
 
 
 
-        #print("relevant: "+ relevant_chunks)
-        #print("done")
-        response = askGptContext(query, relevant_chunks, False)
+            #print("relevant: "+ relevant_chunks)
+            #print("done")
+            response = askGptContext(query, relevant_chunks, False)
 
-        print(response)
+            print(response)
 
-        wolframQuestion = input("Would you like to verify this information with Wolfram Alpha? (yes/no): ")
+            wolframQuestion = input("Would you like to verify this information with Wolfram Alpha? (yes/no): ")
 
-        if wolframQuestion == "yes":
-            processQuestion = askGpt(f"Look at this text \"{response}\" we need to verify its contents with Wolfram Alpha, based on this text give me a list of questions that I can ask Wolfram Alpha API to verify the information, give them to me on this format [question1, question2, question3]", gpt4=True)
-            listOfQuestions = extract_topics_from_response(processQuestion)
+            if wolframQuestion == "yes":
+                processQuestion = askGpt(f"Look at this text \"{response}\" we need to verify its contents with Wolfram Alpha, based on this text give me a list of questions that I can ask Wolfram Alpha API to verify the information, give them to me on this format [question1, question2, question3]", gpt4=True)
+                listOfQuestions = extract_topics_from_response(processQuestion)
 
-            # Initialize a list to store Wolfram Alpha answers
-            wolfram_answers = []
+                # Initialize a list to store Wolfram Alpha answers
+                wolfram_answers = []
 
-            # Iterate through the list of questions and ask Wolfram Alpha API
-            for question in listOfQuestions:
-                try:
-                    res = wolframClient.query(question)
-                    answer = next(res.results).text
-                    wolfram_answers.append(answer)
-                    print(f"Question: {question}\nAnswer: {answer}\n")
-                except (StopIteration, AttributeError):
-                    print(f"Question: {question}\nAnswer: No answer found\n")
+                # Iterate through the list of questions and ask Wolfram Alpha API
+                for question in listOfQuestions:
+                    try:
+                        res = wolframClient.query(question)
+                        answer = next(res.results).text
+                        wolfram_answers.append(answer)
+                        print(f"Question: {question}\nAnswer: {answer}\n")
+                    except (StopIteration, AttributeError):
+                        print(f"Question: {question}\nAnswer: No answer found\n")
 
-            # Convert the list of Wolfram Alpha answers to a string
-            wolfram_answers_str = " ".join(wolfram_answers)
+                # Convert the list of Wolfram Alpha answers to a string
+                wolfram_answers_str = " ".join(wolfram_answers)
 
-            # Ask GPT if the text is accurate based on Wolfram Alpha answers
-            gpt_question = f"Given this information from Wolfram Alpha \"{wolfram_answers_str}\", is what this text says accurate \"{response}\"?"
-            gpt_answer = askGpt(gpt_question, gpt4=True)
-            
-            print("GPT's evaluation:", gpt_answer)
-        else:
-            print("Closing...")
+                # Ask GPT if the text is accurate based on Wolfram Alpha answers
+                gpt_question = f"Given this information from Wolfram Alpha \"{wolfram_answers_str}\", is what this text says accurate \"{response}\"?"
+                gpt_answer = askGpt(gpt_question, gpt4=True)
+                
+                print("GPT's evaluation:", gpt_answer)
+            else:
+                print("Closing...")
     elif(loader == "3"):
         count = 0
         try:
@@ -1715,9 +2028,40 @@ def main():
             sys.stdout.flush()
     elif(loader == "4"):
         checkUpRun(courses)
+        print("Check up done, closing now...")
+    elif(loader == "5"):
+        print("What course would you like to fix its latest transcript with:")
+        print("[REMEMBER TO FIRST UPLOAD THE TRANSCRIPT]")
+        print()
+        courseInput = int(input("Thermo (0), Quantum (1), Mas (2), EM1 (3), Calc4 (4): "))
+
+        if courseInput >=0 and courseInput <= 4:
+            courses[courseInput].main_note.lessons[-1] = updateNewestWithTranscript(courses[courseInput])
+            print("summary complete, closing...")
+        else:
+            print("Invalid choice, closing...")
+    elif(loader == "6"):
+        asnw = input("Please add the path to the pdf with questions: ")
+        print(extract_questions_from_pdf(asnw)) 
+    elif(loader == "7"):
+        ##run Emergency transcript/course protocol, use if you have not uploaded periodically
+        #must, post updated version of every main note, then in order, post every transcript missed
+        #Will process all transcripts and GUESS that all lessons are equipartitioned, which is a good heuristic
+        #Do not depend on this, please
+
+        emergencyTranscriptProtocol()
+        print("Protocol finished")
+        sys.exit()
     else:
         # for coursee in courses:
         #     print(coursee.main_note.lessons[-1].topics)
+        #print(courses[0].name)
+        # courses[0].main_note.lessons[-1] = updateNewestWithTranscript(courses[0])
+        # courses[1].main_note.lessons[-1] = updateNewestWithTranscript(courses[1])
+        # courses[2].main_note.lessons[-1] = updateNewestWithTranscript(courses[2])
+        # courses[3].main_note.lessons[-1] = updateNewestWithTranscript(courses[3])
+        #courses[4].main_note.lessons[-1] = updateNewestWithTranscript(courses[4])
+
         print("Closing...")
         time.sleep(1)
 
